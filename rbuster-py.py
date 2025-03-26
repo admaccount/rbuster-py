@@ -1,69 +1,82 @@
 import argparse
+import socket
+import ipaddress
 import os
+from scapy.all import *
 
+DEFAULT_PORT = 873
+RSYNC_BANNER = b"@RSYNCD: "
 
-def scan(RHOST, port=873):
-    """
-    Scans a host or IP range to detect open RSYNC ports using nmap.
+def is_rsync_installed():
+    return os.system("command -v rsync >/dev/null 2>&1") == 0
 
-    Args:
-        RHOST (str): Host or IP range in CIDR format (e.g., "192.168.1.0/24").
-        port (int): Port to scan (default: 873).
-
-    Returns:
-        list: List of hosts with the RSYNC port open.
-    """
+def scan_ips(target, port=DEFAULT_PORT):
     open_hosts = []
-    print(f"[INFO] Scanning {RHOST} on port {port} using nmap...")
+    print(f"\n[INFO] Scanning {target} on port {port}...")
 
     try:
-        result = os.popen(f"nmap -p {port} {RHOST} -oG -").read()
-        for line in result.splitlines():
-            if "/open/" in line:
-                host = line.split()[1]
-                print(f"[+] Port {port} open on {host}")
-                open_hosts.append(host)
-    except Exception as e:
-        print(f"[ERROR] Failed to scan with nmap: {e}")
+        network = ipaddress.ip_network(target, strict=False)
+        for ip in network.hosts():
+            ip = str(ip)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((ip, port))
+            sock.close()
+
+            if result == 0:
+                print(f"[✔] Port {port} OUVERT sur {ip}")
+                open_hosts.append(ip)
+            else:
+                print(f"[X] Port {port} FERMÉ sur {ip}")
+    except ValueError:
+        print(f"[ERROR] Cible invalide: {target}")
 
     return open_hosts
 
-
-def try_anonymous_access(RHOST, port=873):
-    """
-    Checks if an RSYNC service on a host allows anonymous access using nmap.
-
-    Args:
-        RHOST (str): IP address of the host.
-        port (int): RSYNC port (default: 873).
-
-    Returns:
-        bool: True if anonymous access is allowed, False otherwise.
-    """
-    print(f"[INFO] Attempting anonymous access to {RHOST}:{port} using nmap...")
+def check_rsync_anonymous(host, port=DEFAULT_PORT):
     try:
-        banner_command = f"nmap -p {port} --script=banner {RHOST}"
-        result = os.popen(banner_command).read()
+        with socket.create_connection((host, port), timeout=2) as conn:
+            conn.sendall(b"\n")
+            response = conn.recv(1024)
 
-        if "@RSYNCD" in result:
-            print(f"[+] RSYNC is anonymously accessible on {RHOST}:{port}!")
-            return True
-    except Exception as e:
-        print(f"[ERROR] Error checking anonymous access: {e}")
+            if response.startswith(RSYNC_BANNER):
+                print(f"[✔] Accès RSYNC anonyme OUVERT sur {host}:{port} !")
+                return True
+    except:
+        pass
 
-    print(f"[-] No anonymous access detected on {RHOST}:{port}.")
+    print(f"[-] Accès RSYNC refusé sur {host}:{port}.")
     return False
 
+def list_rsync_modules(host):
+    if not is_rsync_installed():
+        print(f"[ERROR] La commande 'rsync' n'est pas installée.")
+        print(f"[INFO] Installez-la avec : sudo apt install rsync")
+        print(f"[INFO] Essayez directement : rsync rsync://{host}/")
+        return
+
+    try:
+        output = os.popen(f"rsync rsync://{host}/").read()
+
+        if output.strip():
+            print(f"\n📂 [INFO] Liste des répertoires RSYNC accessibles sur {host}:")
+            print("-" * 50)
+            for line in output.splitlines():
+                if line.strip():
+                    print(f"  📁 {line.strip()}")
+            print("-" * 50)
+    except:
+        print(f"[ERROR] Impossible d'obtenir la liste RSYNC pour {host}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="rbuster-py: RSYNC scanning tool.")
-    parser.add_argument("-t", "--target", required=True, help="Host or IP range to scan (e.g., 192.168.1.0/24).")
-    parser.add_argument("-p", "--port", default=873, type=int, help="RSYNC port (default: 873).")
+    parser = argparse.ArgumentParser(description="RSYNC Scanner")
+    parser.add_argument("-t", "--target", required=True, help="IP ou subnet à scanner (ex: 192.168.1.0/24)")
+    parser.add_argument("-p", "--port", default=DEFAULT_PORT, type=int, help="Port RSYNC (par défaut: 873)")
 
     args = parser.parse_args()
 
-    open_hosts = scan(args.target, args.port)
-    for host in open_hosts:
-        if try_anonymous_access(host, args.port):
-            print(f"[INFO] RSYNC anonymously accessible on {host}.")
+    open_hosts = scan_ips(args.target, args.port)
 
+    for host in open_hosts:
+        if check_rsync_anonymous(host, args.port):
+            list_rsync_modules(host)
